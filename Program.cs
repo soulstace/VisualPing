@@ -3,10 +3,12 @@ using System.IO;
 using System.Linq;
 using System.Net.NetworkInformation;
 using System.Threading;
+using System.Threading.Tasks;
 
 class Program
 {
-    private static bool isRunning = true;
+    private static volatile bool isRunning = true;
+    private static readonly byte[] buffer = new byte[32];
 
     static void ShowUsage()
     {
@@ -22,84 +24,110 @@ class Program
         }
 
         string host = args[0];
-        Ping ping = new Ping();
-        PingOptions options = new PingOptions(64, true); // Set TTL to 64 and don't fragment
-        int timeout = 1000;
-        const string timeoutArg = "-w:";
-        Random random = new Random();
-        byte[] buffer = new byte[32];
+        int timeout = ParseTimeout(args);
+        var ping = new Ping();
+        var options = new PingOptions(64, true); // Set TTL to 64 and don't fragment
+        var random = new Random();
+        var waiter = new AutoResetEvent(false);
 
-        // Handle Ctrl+C to exit gracefully
+        ping.PingCompleted += (sender, e) => PingCompletedCallback(e, waiter);
+
+        // Handle Ctrl+C for graceful exit
         Console.CancelKeyPress += (sender, e) =>
         {
-            e.Cancel = true; // Prevent the process from terminating immediately
+            e.Cancel = true; // Prevent immediate termination
             isRunning = false; // Set the running flag to false
             Console.WriteLine("\nExiting...");
         };
+
+        while (isRunning)
+        {
+            random.NextBytes(buffer); // Fill the buffer with random bytes
+
+            if (!waiter.WaitOne(0)) // Non-blocking check
+            {
+                ping.SendAsync(host, timeout, buffer, options, waiter); // Send the ping asynchronously
+            }
+
+            waiter.WaitOne(); // Wait for the ping to complete
+            Thread.Sleep(1000); // Delay before the next ping
+        }
+    }
+
+    private static int ParseTimeout(string[] args)
+    {
+        const string timeoutArg = "-w:";
+        int timeout = 1000; // Default timeout
 
         foreach (var arg in args)
         {
             if (arg.StartsWith(timeoutArg))
             {
-                var value = arg.Substring(timeoutArg.Length);
-
-                if (int.TryParse(value, out timeout))
+                if (int.TryParse(arg.Substring(timeoutArg.Length), out timeout))
                 {
-                    break;
+                    return timeout;
                 }
                 else
                 {
                     ShowUsage();
-                    return;
+                    Environment.Exit(1);
                 }
             }
         }
 
-        while (isRunning)
+        return timeout;
+    }
+
+    private static void PingCompletedCallback(PingCompletedEventArgs e, AutoResetEvent waiter)
+    {
+        if (e.Cancelled)
         {
-            // Fill the buffer with random bytes
-            random.NextBytes(buffer);
+            Console.WriteLine("Ping canceled.");
+            waiter.Set();
+            return;
+        }
 
-            try
+        if (e.Error != null)
+        {
+            _ = LogErrorAsync(e.Error.ToString());
+            waiter.Set();
+            return;
+        }
+
+        DisplayReply(e.Reply);
+        waiter.Set(); // Let the main thread resume
+    }
+
+    private static void DisplayReply(PingReply reply)
+    {
+        if (reply == null) return;
+
+        if (reply.Status == IPStatus.Success)
+        {
+            int rtt = (int)reply.RoundtripTime;
+            Console.WriteLine($"{rtt} {new string('.', rtt)}"); // Print dots for round-trip time
+
+            if (!reply.Buffer.SequenceEqual(buffer))
             {
-                PingReply reply = ping.Send(host, timeout, buffer, options);
-
-                if (reply.Status == IPStatus.Success)
-                {
-                    int rtt = (int)reply.RoundtripTime;
-                    Console.WriteLine($"{rtt} {new string('.', rtt)}"); // Print one dot for each millisecond of the round-trip time
-
-                    if (!reply.Buffer.SequenceEqual(buffer))
-                    {
-                        LogError("Buffer mismatch detected!");
-                    }
-                }
-                else
-                {
-                    LogError($"Ping failed: {reply.Status}");
-                }
+                _ = LogErrorAsync("Buffer mismatch detected!");
             }
-            catch (PingException ex)
-            {
-                LogError($"Ping failed: {ex.Message}");
-            }
-            catch (Exception ex)
-            {
-                LogError($"An error occurred: {ex.Message}");
-            }
-
-            // Wait for a second before the next ping
-            Thread.Sleep(1000);
+        }
+        else
+        {
+            _ = LogErrorAsync($"Ping failed: {reply.Status}");
         }
     }
 
-    static void LogError(string message)
+    private static async Task LogErrorAsync(string message)
     {
         string logFilePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "ping_errors.log");
         string logMessage = $"{DateTime.Now}: {message}";
 
-        // Append the error message to the log file
-        File.AppendAllText(logFilePath, logMessage + Environment.NewLine);
+        using (var writer = new StreamWriter(logFilePath, true))
+        {
+            await writer.WriteLineAsync(logMessage);
+        }
+
         Console.WriteLine(logMessage);
     }
 }
