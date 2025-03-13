@@ -1,5 +1,6 @@
 ﻿using System;
 using System.IO;
+using System.Linq;
 using System.Net.NetworkInformation;
 using System.Threading;
 
@@ -7,11 +8,16 @@ class Program
 {
     private static bool isRunning = true;
 
+    static void ShowUsage()
+    {
+        Console.WriteLine("Usage: pingg <host> [-w:timeout]");
+    }
+
     static void Main(string[] args)
     {
-        if (args.Length != 1)
+        if (args.Length < 1)
         {
-            Console.WriteLine("Usage: pingg <host>");
+            ShowUsage();
             return;
         }
 
@@ -19,6 +25,7 @@ class Program
         Ping ping = new Ping();
         PingOptions options = new PingOptions(64, true); // Set TTL to 64 and don't fragment
         int timeout = 1000;
+        const string timeoutArg = "-w:";
         Random random = new Random();
         byte[] buffer = new byte[32];
 
@@ -29,6 +36,24 @@ class Program
             isRunning = false; // Set the running flag to false
             Console.WriteLine("\nExiting...");
         };
+
+        foreach (var arg in args)
+        {
+            if (arg.StartsWith(timeoutArg))
+            {
+                var value = arg.Substring(timeoutArg.Length);
+
+                if (int.TryParse(value, out timeout))
+                {
+                    break;
+                }
+                else
+                {
+                    ShowUsage();
+                    return;
+                }
+            }
+        }
 
         while (isRunning)
         {
@@ -43,6 +68,11 @@ class Program
                 {
                     int rtt = (int)reply.RoundtripTime;
                     Console.WriteLine($"{rtt} {new string('.', rtt)}"); // Print one dot for each millisecond of the round-trip time
+
+                    if (!reply.Buffer.SequenceEqual(buffer))
+                    {
+                        LogError("Buffer mismatch detected!");
+                    }
                 }
                 else
                 {
@@ -70,6 +100,6 @@ class Program
 
         // Append the error message to the log file
         File.AppendAllText(logFilePath, logMessage + Environment.NewLine);
-        Console.WriteLine(logMessage); // Optionally print the log message to the console
+        Console.WriteLine(logMessage);
     }
 }
